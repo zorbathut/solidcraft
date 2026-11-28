@@ -1335,3 +1335,72 @@ fn a_crossing_that_does_not_drop_and_one_too_far_off_keep_one_status_and_split_t
     }
     assert_ne!(missed, far);
 }
+
+/// A round of 0.5 on the top front edge of a block 20 x 10 x 10 whose end face is skewed by
+/// `theta` about z (x = 20 + y tan theta), ending on it: its rails reach the end face
+/// `0.5 tan theta` apart along the edge (0.01 degrees: 8.7e-5; and 6e-5, 1.5 times the
+/// tolerance 4e-5), the band between the walk's old test of its interval ends (1e-3 of
+/// parameter) and its new one (the 3D tolerance, #13710). A round ending on a face does not
+/// walk segments (its rails end on the end face, one interval each): the change leaves it as
+/// it was, probed with either test, and these guard it. As a prism with an oblique end, the
+/// round takes the spandrel (1 - pi/4) r^2 swept from x = 0 to the end plane,
+/// `(1 - pi/4) r^2 (20 + tan theta * ybar)`, ybar = r (10 - 3 pi) / (12 - 3 pi) its centroid's
+/// distance from the front face.
+fn skewed_end_round_takes_its_closed_form(theta: f64) {
+    use crate::curve::curve::Curve;
+    use crate::math::{Point3, Vec3, PI};
+    let mut k = Kernel::default();
+    let t = theta.tan();
+    let line =
+        |a: Point3, b: Point3| Curve::from(Line::create_line_segment(3, a, b, None).unwrap());
+    let q = [
+        Point3::new(0.0, 0.0, 0.0),
+        Point3::new(20.0, 0.0, 0.0),
+        Point3::new(20.0 + 10.0 * t, 10.0, 0.0),
+        Point3::new(0.0, 10.0, 0.0),
+    ];
+    let profile = std::array::from_fn::<_, 4, _>(|i| line(q[i], q[(i + 1) % 4]));
+    let mut b = crate::sweep::api_brep::create_linear_sweep(
+        &mut k,
+        &profile.each_ref().map(Some),
+        Vec3::Z,
+        10.0,
+        true,
+    )
+    .unwrap();
+    let volume = |k: &Kernel, b: &mut Brep| {
+        crate::mass::integrator::properties::brep_volume_default(k, b, 1e-9).unwrap()
+    };
+    let before = volume(&k, &mut b);
+    let e = crate::topology::brep::p1::edges(&b, None)
+        .unwrap()
+        .into_iter()
+        .find(|&e| {
+            crate::query::api_queries::edge_closest_point(&k, &b, e, Point3::new(10.0, 0.0, 10.0))
+                .unwrap()
+                .closest
+                .distance
+                < 1e-9
+        })
+        .unwrap();
+    let r = 0.5;
+    crate::blend::fillet_executive::api::fillet_edges(&mut k, &mut b, &[e], r, 1, 1, 1.0).unwrap();
+    assert!(crate::topology::brep::p2::is_manifold_solid(&b).unwrap());
+    let ybar = r * (10.0 - 3.0 * PI) / (12.0 - 3.0 * PI);
+    let want = (1.0 - PI / 4.0) * r * r * (20.0 + t * ybar);
+    let removed = before - volume(&k, &mut b);
+    assert!(
+        (removed - want).abs() <= 1e-9,
+        "theta {theta}: removed {removed}, the closed form {want}"
+    );
+}
+
+#[test]
+fn a_round_ending_on_an_end_face_skewed_by_a_hundredth_of_a_degree_takes_its_closed_form() {
+    skewed_end_round_takes_its_closed_form(0.01_f64.to_radians());
+}
+
+#[test]
+fn a_round_ending_on_an_end_face_skewed_by_one_and_a_half_tolerances_takes_its_closed_form() {
+    skewed_end_round_takes_its_closed_form((6e-5_f64 / 0.5).atan());
+}

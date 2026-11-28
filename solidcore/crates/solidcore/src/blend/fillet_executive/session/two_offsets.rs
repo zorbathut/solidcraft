@@ -2376,10 +2376,53 @@ mod tests {
         /// ε = 0.00124939 rad (200 (1 - cos ε) + 156.25 tan² ε = 0.02²), and at V it lies off the
         /// side face only by the cylinder's sag over its drop below the seam,
         /// (0.02 · 0.8 / sqrt(1.64))² / (2 · 10) = 7.8e-6, within the solvers' 3D (and zone)
-        /// tolerance 4e-5: `join::setback_seam_sides` decides nothing, the Join is not deferred
-        /// and keeps its ends where the rails cross the seam. This test guards today's result
+        /// tolerance 4e-5, and the two chamfers' sections where their feet cross the seam lie
+        /// 2.1e-5 apart, within the margin (tol + 2 tol / sin, the paths about square to the
+        /// seam): `join::setback_seam_sides` defers nothing, and the Join keeps its ends where
+        /// the rails cross the seam. This test guards today's result
         /// (it passes without the deferral): a closed solid with one chamfer of setbacks per
         /// edge, five.
+        /// The same chain at 0.04, between the two: the sections at the seam crossings lie about
+        /// 8.4e-5 apart (the gap grows as d², 1.314e-4 at 0.05), above the tolerance 4e-5 but
+        /// within the margin 1.2e-4 the prediction carries (tol + 2 tol / sin, the built ends
+        /// each within the tolerance of their stations), and the sag at V, (0.04 · 0.8 /
+        /// sqrt(1.64))² / 20 = 3.1e-5, is within the tolerance: nothing defers the Join, and
+        /// it stays on the seam, where its sections do not meet within the tolerance. The
+        /// chain is refused as today's path refuses it (B2a measured it so), naming the corner
+        /// whose edges the join check did not make, never built on a guess.
+        #[test]
+        fn the_enclosure_front_chain_between_the_tolerance_and_the_margin_keeps_today_s_join() {
+            let d = [0.04, 0.04];
+            let mut k = fixed_kernel();
+            let mut b = enclosure_front(&mut k);
+            let slant = face_holding(&k, &b, |bx| {
+                bx.min().z.abs() < 1e-6
+                    && (bx.max().z - 20.0).abs() < 1e-6
+                    && (bx.min().y - 15.0).abs() < 1e-6
+                    && (bx.max().y - 40.0).abs() < 1e-6
+            })[0];
+            let front_face = face_holding(&k, &b, |bx| {
+                bx.min().z.abs() < 1e-6 && bx.max().z.abs() < 1e-6
+            });
+            let chain: Vec<EdgeId> = crate::topology::face::p4::edges(&b, slant, None, false, None)
+                .unwrap()
+                .into_iter()
+                .filter(|&e| !edge::faces(&b, e, None).unwrap().contains(&front_face[0]))
+                .collect();
+            assert_eq!(chain.len(), 5);
+            let err = chamfer_setbacks(&mut k, &mut b, &chain, &[d; 5], &[slant; 5]).unwrap_err();
+            let mut at = Some(&err);
+            let mut corner = false;
+            while let Some(x) = at {
+                corner |= x.blend_failure()
+                    == Some(&crate::error::blend::BlendFailure::CornerPatchNotMade(
+                        crate::error::blend::CornerPatchMiss::EdgeGeometryNotCalculated,
+                    ));
+                at = x.cause();
+            }
+            assert!(corner, "{err:?}");
+        }
+
         #[test]
         fn the_enclosure_front_chain_with_setbacks_below_the_seams_sag_is_joined_on_the_seams() {
             let d = [0.02, 0.02];

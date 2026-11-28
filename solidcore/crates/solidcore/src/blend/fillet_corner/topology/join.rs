@@ -663,15 +663,17 @@ fn setback_seam_sides(
     // the station s* on its own edge where that foot lies on the seam, E(t) for the seam's
     // curve E, by Newton on |E(t) - C(s)|^2 = d^2, (E(t) - C(s)) . C'(s) = 0 from the foot
     // at V (`from`, dropped on the seam for t) and V's s; the station's feet at s*, in rail
-    // order, with that face's rail. `None` where the solve does not converge or the station's
-    // foot there is not E(t*): nothing is decided. The root is not certified: s* is
-    // Newton's, as today's Join's crossings are the traced rails'.
+    // order, with that face's rail and the sine of the angle the foot's path makes with the
+    // seam there. `None` where the solve does not converge, t* lies outside the seam edge, or
+    // the station's foot there is not E(t*) (within 1e-9 of the coordinates' size): nothing is
+    // decided by it. The root is not certified: s* is Newton's, as today's Join's crossings
+    // are the traced rails'.
     let crossing = |target: &mut Brep,
                     fs: &mut crate::blend::fillet_standard_solver::setback::SetbackFs,
                     face: FaceId,
                     seam: crate::topology::EdgeId,
                     from: crate::math::Point3|
-     -> Result<Option<([crate::math::Point3; 2], usize)>> {
+     -> Result<Option<([crate::math::Point3; 2], usize, f64)>> {
         let rail = fs
             .curve_based
             .solver
@@ -718,7 +720,15 @@ fn setback_seam_sides(
         if !converged {
             return Ok(None);
         }
-        let on_seam = curve.evaluate_point(k, t)?;
+        let seam_ivl = edge::interval(target, seam)?;
+        let room = 1e-9 * (seam_ivl.max() - seam_ivl.min()).abs();
+        if !(t >= seam_ivl.min() - room && t <= seam_ivl.max() + room) {
+            return Ok(None);
+        }
+        let pv = curve.evaluate(k, t, 1, false, false)?;
+        let (Some(&on_seam), Some(&along)) = (pv.first(), pv.get(1)) else {
+            return Ok(None);
+        };
         let jet = fs.jet(k, s)?;
         let domains = fs.trace_domains(k)?;
         let mut uvs = [crate::math::Point2::new(0.0, 0.0); 2];
@@ -744,18 +754,26 @@ fn setback_seam_sides(
             return Ok(None);
         };
         let feet = [station.feet[0].point, station.feet[1].point];
-        // the station's foot on this face is the seam point, else another root was found
-        match feet.get(rail) {
-            Some(p) if p.distance(on_seam) <= 1e-9 * (1.0 + d) => Ok(Some((feet, rail))),
-            _ => Ok(None),
+        // the station's foot on this face is the seam point (to the coordinates' rounding),
+        // else another root was found
+        let size = 1.0 + d + on_seam.x.abs().max(on_seam.y.abs()).max(on_seam.z.abs());
+        let (Some(p), Some(foot)) = (feet.get(rail), station.feet.get(rail)) else {
+            return Ok(None);
+        };
+        let off = p.distance(on_seam);
+        if off.is_nan() || off > 1e-9 * size {
+            return Ok(None);
         }
+        let path = foot.per_s;
+        let sine = path.cross(along).length() / (path.length() * along.length());
+        Ok(sine.is_finite().then_some((feet, rail, sine)))
     };
     let soft_crossing = |target: &mut Brep,
                          fs: &mut crate::blend::fillet_standard_solver::setback::SetbackFs,
                          face: FaceId,
                          seam: crate::topology::EdgeId,
                          from: crate::math::Point3|
-     -> Result<Option<([crate::math::Point3; 2], usize)>> {
+     -> Result<Option<([crate::math::Point3; 2], usize, f64)>> {
         match crossing(target, fs, face, seam, from) {
             Ok(c) => Ok(c),
             Err(e) if e.is_unported_or_cancelled() => Err(e),
@@ -793,37 +811,51 @@ fn setback_seam_sides(
         ) else {
             continue;
         };
-        // today's Join ends on the seam, on each blend's section where its foot crosses it,
-        // and the join check (`examine_n_fix_fillet_geoms`) refuses it where those sections
-        // are farther apart than the solvers' tolerance. That check reads the built surfaces'
-        // end rows against the Join's vertices, none of which exist yet (the trace has not
-        // run), so it cannot be asked here: the same sections are predicted from the exact
-        // stations at the crossings (on the cut bar of #21518, 3.0189e-3 predicted against
-        // the 3.02e-3 the check measured). The built ends each lie within the rails'
-        // certified bound, at most the tolerance, of the predicted ones, so the measured gap
-        // is within twice the tolerance of the prediction: a Join is deferred only where the
-        // prediction is above three times it, never one the check would let through.
-        // Crossings not found: nothing is decided
-        let (Some((feet_a, rail_a)), Some((feet_b, rail_b))) = (
+        // Today's Join ends on the seam, on each blend's section where its foot crosses it
+        // (the traced rails' crossings), and the join check (`examine_n_fix_fillet_geoms`)
+        // compares the built surfaces' end rows with the Join's vertices there. It cannot be
+        // asked here: none of those exist before the trace. What holds is a prediction of the
+        // same sections from the exact stations at the crossings (the cut bar of #21518:
+        // 3.0189e-3 predicted, 3.02e-3 measured). Each built end lies within the rails'
+        // certified bound, at most the tolerance, of its station; along the seam that moves
+        // its crossing by up to tol / sin, the sine of the angle between the foot's path and
+        // the seam, so the built sections' gap is within 2 tol / sin of the predicted one. A
+        // side is deferred where the prediction is above tol + 2 tol / sin: there the built
+        // sections are farther apart than the tolerance. That is not the check's refusal
+        // itself (the check copies one surface's end row onto the other where that one fits
+        // the vertices, and passes analytic and low-degree surfaces by): that no Join that
+        // builds today is deferred is measured, on the goldens, the rig and the suites, not
+        // proved. B2a's rule stands beside it, so its decisions never weaken: a side is also
+        // deferred where the two feet at V are farther apart than the tolerance (the support's
+        // sag off the face beyond; on the plane-cylinder-plane family B2a measured, today's gap
+        // is then at least about 1.41 times the sag). Where a crossing is not found, or a path
+        // runs within 1e-3 radians of the seam, the sections decide nothing and only that rule
+        // does.
+        let crossings = (
             soft_crossing(target, &mut fs0, fa, seam, pa)?,
             soft_crossing(target, &mut fs1, fb, seam, pb)?,
-        ) else {
-            continue;
-        };
+        );
         let pick = |feet: &[crate::math::Point3; 2], rail: usize| {
             (feet.get(rail).copied(), feet.get(1 - rail.min(1)).copied())
         };
-        let ((Some(seam_a), Some(shared_a)), (Some(seam_b), Some(shared_b))) =
-            (pick(&feet_a, rail_a), pick(&feet_b, rail_b))
-        else {
-            continue;
+        let gap_decides = match crossings {
+            (Some((feet_a, rail_a, sin_a)), Some((feet_b, rail_b, sin_b)))
+                if sin_a.min(sin_b) >= 1e-3 =>
+            {
+                match (pick(&feet_a, rail_a), pick(&feet_b, rail_b)) {
+                    ((Some(seam_a), Some(shared_a)), (Some(seam_b), Some(shared_b))) => {
+                        let gap = seam_a.distance(seam_b).max(shared_a.distance(shared_b));
+                        Some(gap > tol + 2.0 * tol / sin_a.min(sin_b))
+                    }
+                    _ => None,
+                }
+            }
+            _ => None,
         };
-        let gap = seam_a.distance(seam_b).max(shared_a.distance(shared_b));
-        if gap <= 3.0 * tol {
+        let defer = gap_decides.unwrap_or(false) || pa.distance(pb) > tol;
+        if !defer {
             continue;
         }
-        // the native blend: its foot inside its own face, the other's foot dropping inside it
-        // too (beyond the seam from the other's face); exactly one of the two may be
         let a_native = soft(inside(target, &fs0, fa, pa))? && soft(inside(target, &fs0, fa, pb))?;
         let b_native = soft(inside(target, &fs1, fb, pb))? && soft(inside(target, &fs1, fb, pa))?;
         let native = match (a_native, b_native) {

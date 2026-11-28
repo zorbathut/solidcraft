@@ -1187,16 +1187,18 @@ impl Recovery<'_> {
                 // point on each rail within the solver's 3D tolerance, not within 1e-3 of
                 // parameter, which is no length: on a 38 long edge 4e-4 of it is 0.015, a
                 // roll-over piece's own segment
+                // (a distance that is not a number is no evidence the ends are one)
                 let tol = self.solver.solver().approx_tol_3d;
-                let mut apart = 0.0_f64;
+                let mut together = true;
                 for rail in &rails {
                     let (a, b) = (
                         rail.curve.evaluate_point(self.k, p0)?,
                         rail.curve.evaluate_point(self.k, p1)?,
                     );
-                    apart = apart.max(a.distance(b));
+                    let apart = a.distance(b);
+                    together &= apart.is_finite() && apart <= tol;
                 }
-                if apart <= tol {
+                if together {
                     guess = p0;
                     for r in &mut rails {
                         r.index += 1;
