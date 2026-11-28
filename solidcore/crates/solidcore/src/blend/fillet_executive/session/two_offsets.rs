@@ -1449,6 +1449,179 @@ mod tests {
             ball_rim_chamfered_by_setbacks_1_and_1(10.0, 5.0, 632.563_292_709_4, true, true);
         }
 
+        /// #21518's bar end: a 40 x 6 bar, its section's corners rounded 1, along y and cut by
+        /// the plane y = 20 + `slope` x; its end's rim of eight edges (the top and bottom
+        /// edges, the two sides, four elliptic arcs on the rounds' cylinders), a tangent chain.
+        fn cut_bar(k: &mut Kernel, slope: f64) -> Brep {
+            use crate::curve::arc::ArcDefinition;
+            use crate::curve::curve::Curve;
+            use crate::curve::line::Line;
+            use crate::curve::path::PathPiece;
+            let line = |a, b| Curve::from(Line::create_line_segment(3, a, b, None).unwrap());
+            let arc = |k: &mut Kernel, x, z, quarter: f64| {
+                let step = 0.5 * PI;
+                PathPiece::of_arc(
+                    k,
+                    &ArcDefinition {
+                        centre: Point3::new(x, 0.0, z),
+                        axis: -Vec3::Y,
+                        reference: Vec3::X,
+                        radius: 1.0,
+                        start: quarter * step,
+                        end: (quarter + 1.0) * step,
+                    },
+                )
+                .unwrap()
+                .curve()
+                .clone()
+            };
+            let p = |x, z| Point3::new(x, 0.0, z);
+            let profile = [
+                line(p(-19.0, 0.0), p(19.0, 0.0)),
+                arc(k, 19.0, 1.0, -1.0),
+                line(p(20.0, 1.0), p(20.0, 5.0)),
+                arc(k, 19.0, 5.0, 0.0),
+                line(p(19.0, 6.0), p(-19.0, 6.0)),
+                arc(k, -19.0, 5.0, 1.0),
+                line(p(-20.0, 5.0), p(-20.0, 1.0)),
+                arc(k, -19.0, 1.0, 2.0),
+            ];
+            let bar = crate::sweep::api_brep::create_linear_sweep(
+                k,
+                &profile.each_ref().map(Some),
+                Vec3::Y,
+                40.0,
+                true,
+            )
+            .unwrap();
+            let cut = [
+                Point3::new(-30.0, -5.0, -5.0),
+                Point3::new(30.0, -5.0, -5.0),
+                Point3::new(30.0, 20.0 + 30.0 * slope, -5.0),
+                Point3::new(-30.0, 20.0 - 30.0 * slope, -5.0),
+            ];
+            let profile =
+                std::array::from_fn::<_, 4, _>(|i| line(cut[i], cut[(i + 1) % cut.len()]));
+            let cutter = crate::sweep::api_brep::create_linear_sweep(
+                k,
+                &profile.each_ref().map(Some),
+                Vec3::Z,
+                25.0,
+                true,
+            )
+            .unwrap();
+            crate::boolean::api_brep::boolean_difference(k, bar, cutter).unwrap()
+        }
+
+        /// #21518's bar end chamfered by setbacks `w` and `w` all round. At a vertex where a
+        /// top or bottom edge meets an arc, the face beside the edge and the round's cylinder
+        /// are tangent along the seam x = +-19 (along y), and V's station plane is square to
+        /// the edges' common tangent (1, `slope`, 0): the seam lies in it only for `slope` 0.
+        /// Off it, each chamfer's foot crosses the seam at its own station, about `w slope`
+        /// apart along the edge, over which the round of radius 1 turns the sections by about
+        /// `w / 1`: they lie about `w^2 slope` apart (0.2 at 0.0755: 3.02e-3, the end-face feet
+        /// at x = 19.0151 and 19.0121; 0.0123: 1.1e-5). Past three times the tolerance 4e-5
+        /// the Join is deferred and one chamfer rolls over onto the other's face, a piece, at
+        /// each of the four such vertices; below it today's Join on the seam stands. At the
+        /// sides (x = +-20) the seam (along y) lies in the station plane z = const: no piece.
+        /// So the chamfers of setbacks are the eight edges' and, where deferred, four pieces;
+        /// every rail point is `w` from the rim and square to it.
+        fn cut_bar_holds_its_setbacks(slope: f64, w: f64, chamfer_faces: usize) {
+            let mut k = fixed_kernel();
+            let mut b = cut_bar(&mut k, slope);
+            assert!(closed(&b));
+            let start = crate::topology::brep::p1::edges(&b, None)
+                .unwrap()
+                .into_iter()
+                .find(|&e| {
+                    crate::query::api_queries::edge_closest_point(
+                        &k,
+                        &b,
+                        e,
+                        Point3::new(0.0, 20.0, 6.0),
+                    )
+                    .unwrap()
+                    .closest
+                    .distance
+                        < 1e-9
+                })
+                .unwrap();
+            let chain = crate::blend::blend_refusal::tangent_chain(
+                &k,
+                &mut b,
+                &[start],
+                0.5_f64.to_radians(),
+            )
+            .unwrap();
+            assert_eq!(chain.len(), 8);
+            let originals: Vec<crate::curve::curve::Curve> = chain
+                .iter()
+                .map(|&e| edge::curve(&b, e).unwrap().unwrap().clone())
+                .collect();
+            // the end face, the cut (the bar kept runs from it to y = 40): each edge's first
+            // setback along it (both are w)
+            let end = face_holding(&k, &b, |bx| {
+                bx.min().z < 0.5 && bx.max().z > 5.5 && bx.min().y > 18.0 && bx.max().y < 25.0
+            });
+            assert_eq!(end.len(), 1);
+            chamfer_setbacks(&mut k, &mut b, &chain, &[[w, w]; 8], &[end[0]; 8]).unwrap();
+            assert!(closed(&b), "{slope} {w}: not closed");
+            let faces = setback_faces(&k, &b);
+            assert_eq!(
+                faces.len(),
+                chamfer_faces,
+                "{slope} {w}: chamfers of setbacks"
+            );
+            let chamfers: Vec<FaceId> = faces.iter().map(|f| f.0).collect();
+            let mut rails = 0;
+            for &(f, bound) in &faces {
+                for e in crate::topology::face::p4::edges(&b, f, None, false, None).unwrap() {
+                    // a rail: the chamfer's edge on a face it was cut from
+                    if edge::faces(&b, e, None)
+                        .unwrap()
+                        .iter()
+                        .any(|o| *o != f && chamfers.contains(o))
+                    {
+                        continue;
+                    }
+                    let tol = edge::tolerance(&b, e).unwrap() + bound + 1e-9;
+                    for p in along_edge(&k, &b, e) {
+                        let (c, t) = nearest_on(&k, &originals, p);
+                        let arm = p - c;
+                        assert!(
+                            (arm.length() - w).abs() <= tol,
+                            "{slope} {w}: {p:?} is {} from the rim",
+                            arm.length()
+                        );
+                        assert!(arm.dot(t).abs() <= tol, "{slope} {w}: {p:?} not square");
+                        rails += 1;
+                    }
+                }
+            }
+            assert!(rails >= 9 * 16, "{rails}");
+        }
+
+        /// #21518's bar cut at 4.32 degrees (slope 0.0755414), its rim chamfered by setbacks 0.2:
+        /// twelve chamfers of setbacks (eight edges, four pieces at the deferred Joins); by
+        /// 0.0123 (sections 1.1e-5 apart at the seams): eight, joined on the seams. Before the Join was deferred on its sections' gap, the vertex at x = 19 kept
+        /// today's Join on the seam (its feet at V coincide, the cylinder's support continued
+        /// there along its tangent plane) and was refused, 3.02e-3 apart; and the piece at
+        /// x = -19, 4e-4 of its rail's parameter long but 0.015 in space, was taken as no
+        /// segment of the walk and left without a surface.
+        #[test]
+        fn the_cut_bar_s_rim_chamfered_by_setbacks_holds_them_and_rolls_over_at_its_arcs() {
+            let slope = (22.266243 - 17.733757) / 60.0;
+            cut_bar_holds_its_setbacks(slope, 0.2, 12);
+            cut_bar_holds_its_setbacks(slope, 0.0123, 8);
+        }
+
+        /// The same bar cut square (slope 0): the seams lie in the station planes, no Join is
+        /// deferred, eight chamfers of setbacks.
+        #[test]
+        fn the_square_cut_bar_s_rim_chamfered_by_setbacks_has_no_piece() {
+            cut_bar_holds_its_setbacks(0.0, 0.2, 8);
+        }
+
         /// A foot crossing a smooth seam mid-edge: a slab, the profile x in [0, 40], y in [-5, 30]
         /// with its corner (0, -5) rounded to 5 (about (5, 0)) swept along z, so the side x = 0
         /// meets the cylinder along the seam y = 0 (along z); cut by the top plane y = 0.5 + 0.1 z

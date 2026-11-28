@@ -1183,7 +1183,20 @@ impl Recovery<'_> {
             let mut guess = 0.0;
             if corner_eu.is_none() {
                 let [p0, p1] = params;
-                if (p0 - p1).abs() < 1.0e-3 {
+                // (not upstream, #13710) the two intervals end together where their ends are one
+                // point on each rail within the solver's 3D tolerance, not within 1e-3 of
+                // parameter, which is no length: on a 38 long edge 4e-4 of it is 0.015, a
+                // roll-over piece's own segment
+                let tol = self.solver.solver().approx_tol_3d;
+                let mut apart = 0.0_f64;
+                for rail in &rails {
+                    let (a, b) = (
+                        rail.curve.evaluate_point(self.k, p0)?,
+                        rail.curve.evaluate_point(self.k, p1)?,
+                    );
+                    apart = apart.max(a.distance(b));
+                }
+                if apart <= tol {
                     guess = p0;
                     for r in &mut rails {
                         r.index += 1;
