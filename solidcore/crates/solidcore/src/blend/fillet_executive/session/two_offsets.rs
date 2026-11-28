@@ -2382,14 +2382,13 @@ mod tests {
         /// the rails cross the seam. This test guards today's result
         /// (it passes without the deferral): a closed solid with one chamfer of setbacks per
         /// edge, five.
-        /// The same chain at 0.04, between the two: the sections at the seam crossings lie about
-        /// 8.4e-5 apart (the gap grows as d², 1.314e-4 at 0.05), above the tolerance 4e-5 but
-        /// within the margin 1.2e-4 the prediction carries (tol + 2 tol / sin, the built ends
-        /// each within the tolerance of their stations), and the sag at V, (0.04 · 0.8 /
-        /// sqrt(1.64))² / 20 = 3.1e-5, is within the tolerance: nothing defers the Join, and
-        /// it stays on the seam, where its sections do not meet within the tolerance. The
-        /// chain is refused as today's path refuses it (B2a measured it so), naming the corner
-        /// whose edges the join check did not make, never built on a guess.
+        /// The same chain at 0.04, between the two. The sections at the seam crossings lie
+        /// about 8.4e-5 apart: not derived, the gap measured at 0.05 (1.314e-4) scaled by d², as
+        /// the measured gaps of B2a's chains run. That is above the tolerance 4e-5 but within
+        /// the margin the prediction carries (the built ends' errors, at least 3 tol), and
+        /// the sag at V, (0.04 · 0.8 / sqrt(1.64))² / 20 = 3.1e-5, is within the tolerance:
+        /// no corner's Join is deferred, and it stays on the seam, where today's path refuses
+        /// it (B2a measured it so).
         #[test]
         fn the_enclosure_front_chain_between_the_tolerance_and_the_margin_keeps_today_s_join() {
             let d = [0.04, 0.04];
@@ -2410,17 +2409,21 @@ mod tests {
                 .filter(|&e| !edge::faces(&b, e, None).unwrap().contains(&front_face[0]))
                 .collect();
             assert_eq!(chain.len(), 5);
-            let err = chamfer_setbacks(&mut k, &mut b, &chain, &[d; 5], &[slant; 5]).unwrap_err();
-            let mut at = Some(&err);
-            let mut corner = false;
-            while let Some(x) = at {
-                corner |= x.blend_failure()
-                    == Some(&crate::error::blend::BlendFailure::CornerPatchNotMade(
-                        crate::error::blend::CornerPatchMiss::EdgeGeometryNotCalculated,
-                    ));
-                at = x.cause();
+            let mut s = FilletSession::new(&mut k, &mut b).unwrap();
+            s.prepare_setback_chamfers(&k, &chain, &[d; 5], &[slant; 5])
+                .unwrap();
+            s.create_corners(&k, None).unwrap();
+            let corners = s.fillet_corners().unwrap();
+            for &corner in &corners {
+                s.set_corner_bevel(corner, true).unwrap();
             }
-            assert!(corner, "{err:?}");
+            assert!(s.do_filleting(&mut k, None).is_err());
+            for corner in corners {
+                assert!(
+                    !s.corner(corner).unwrap().deferred_join,
+                    "{corner:?} deferred"
+                );
+            }
         }
 
         #[test]

@@ -1404,3 +1404,22 @@ fn a_round_ending_on_an_end_face_skewed_by_a_hundredth_of_a_degree_takes_its_clo
 fn a_round_ending_on_an_end_face_skewed_by_one_and_a_half_tolerances_takes_its_closed_form() {
     skewed_end_round_takes_its_closed_form((6e-5_f64 / 0.5).atan());
 }
+
+/// The walk's interval ends are one only where each rail's two ends are within the tolerance:
+/// apart by more, or by a distance that is not a number, they are two (#13710). Taken as the
+/// larger of the distances, a NaN was dropped (`f64::max`) and the ends merged.
+#[test]
+fn the_walk_s_interval_ends_are_one_only_within_the_tolerance_and_never_on_a_nan() {
+    let tol = 4e-5;
+    assert!(ends_together(&[0.0, 3e-5], tol));
+    assert!(ends_together(&[tol, tol], tol));
+    assert!(!ends_together(&[0.0, 8.7e-5], tol));
+    assert!(!ends_together(&[f64::NAN, 0.0], tol));
+    assert!(!ends_together(&[0.0, f64::NAN], tol));
+    assert!(!ends_together(&[f64::INFINITY], tol));
+    let merged_by_max = [0.0, f64::NAN].iter().fold(0.0_f64, |m, d| m.max(*d)) <= tol;
+    assert!(
+        merged_by_max,
+        "f64::max drops the NaN: the old reading merged these"
+    );
+}

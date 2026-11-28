@@ -1187,18 +1187,16 @@ impl Recovery<'_> {
                 // point on each rail within the solver's 3D tolerance, not within 1e-3 of
                 // parameter, which is no length: on a 38 long edge 4e-4 of it is 0.015, a
                 // roll-over piece's own segment
-                // (a distance that is not a number is no evidence the ends are one)
                 let tol = self.solver.solver().approx_tol_3d;
-                let mut together = true;
+                let mut apart = Vec::new();
                 for rail in &rails {
                     let (a, b) = (
                         rail.curve.evaluate_point(self.k, p0)?,
                         rail.curve.evaluate_point(self.k, p1)?,
                     );
-                    let apart = a.distance(b);
-                    together &= apart.is_finite() && apart <= tol;
+                    apart.push(a.distance(b));
                 }
-                if together {
+                if ends_together(&apart, tol) {
                     guess = p0;
                     for r in &mut rails {
                         r.index += 1;
@@ -1599,6 +1597,13 @@ impl Recovery<'_> {
         }
         Ok(())
     }
+}
+
+/// Whether the rails' interval ends are one end of the walk (#13710): each rail's two ends
+/// `apart` (its points at the two parameters) within the solver's 3D tolerance `tol`. A
+/// distance that is not a number is no evidence they are.
+fn ends_together(apart: &[f64], tol: f64) -> bool {
+    apart.iter().all(|d| d.is_finite() && *d <= tol)
 }
 
 #[cfg(test)]

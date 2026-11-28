@@ -515,6 +515,20 @@ fn rolled_sides(
     Ok(out)
 }
 
+/// A blend's section where its foot crosses a seam (`setback_seam_sides`): its feet in rail
+/// order, the rail on the seam's face, the sine of the angle between that foot's path and the
+/// seam, and the other foot's speed along the edge over that one's (`|per_s|`). A built end
+/// within the tolerance of its station shifts its seam crossing by up to tol / sine along the
+/// seam, which moves the station by that over the seam foot's speed and so the other foot by
+/// up to ratio * tol / sine.
+#[derive(Debug, Clone, Copy)]
+struct Crossing {
+    feet: [crate::math::Point3; 2],
+    rail: usize,
+    sine: f64,
+    ratio: f64,
+}
+
 /// Not the fork's (#13710): two chamfers of setbacks continuing each other at a smooth
 /// vertex V, on a side where the one edge between them (`between`) is a smooth seam between
 /// their faces there (`side`; tangent across, [`test_manifold_tangent_rollover`]). The edges
@@ -673,7 +687,7 @@ fn setback_seam_sides(
                     face: FaceId,
                     seam: crate::topology::EdgeId,
                     from: crate::math::Point3|
-     -> Result<Option<([crate::math::Point3; 2], usize, f64)>> {
+     -> Result<Option<Crossing>> {
         let rail = fs
             .curve_based
             .solver
@@ -722,6 +736,13 @@ fn setback_seam_sides(
         }
         let seam_ivl = edge::interval(target, seam)?;
         let room = 1e-9 * (seam_ivl.max() - seam_ivl.min()).abs();
+        // a closed seam's crossing is the one in its period
+        if edge::is_closed(target, seam)? {
+            let (lo, period) = (seam_ivl.min(), seam_ivl.max() - seam_ivl.min());
+            if period > 0.0 && t.is_finite() {
+                t = lo + (t - lo).rem_euclid(period);
+            }
+        }
         if !(t >= seam_ivl.min() - room && t <= seam_ivl.max() + room) {
             return Ok(None);
         }
@@ -766,14 +787,24 @@ fn setback_seam_sides(
         }
         let path = foot.per_s;
         let sine = path.cross(along).length() / (path.length() * along.length());
-        Ok(sine.is_finite().then_some((feet, rail, sine)))
+        let other = station.feet.get(1 - rail.min(1)).map(|f| f.per_s.length());
+        let ratio = other.map(|o| o / path.length());
+        Ok(match ratio {
+            Some(ratio) if sine.is_finite() && ratio.is_finite() => Some(Crossing {
+                feet,
+                rail,
+                sine,
+                ratio,
+            }),
+            _ => None,
+        })
     };
     let soft_crossing = |target: &mut Brep,
                          fs: &mut crate::blend::fillet_standard_solver::setback::SetbackFs,
                          face: FaceId,
                          seam: crate::topology::EdgeId,
                          from: crate::math::Point3|
-     -> Result<Option<([crate::math::Point3; 2], usize, f64)>> {
+     -> Result<Option<Crossing>> {
         match crossing(target, fs, face, seam, from) {
             Ok(c) => Ok(c),
             Err(e) if e.is_unported_or_cancelled() => Err(e),
@@ -817,11 +848,14 @@ fn setback_seam_sides(
         // asked here: none of those exist before the trace. What holds is a prediction of the
         // same sections from the exact stations at the crossings (the cut bar of #21518:
         // 3.0189e-3 predicted, 3.02e-3 measured). Each built end lies within the rails'
-        // certified bound, at most the tolerance, of its station; along the seam that moves
-        // its crossing by up to tol / sin, the sine of the angle between the foot's path and
-        // the seam, so the built sections' gap is within 2 tol / sin of the predicted one. A
-        // side is deferred where the prediction is above tol + 2 tol / sin: there the built
-        // sections are farther apart than the tolerance. That is not the check's refusal
+        // certified bound, at most the tolerance, of its station. Along the seam that moves
+        // its crossing by up to tol / sin (sin: the angle between the seam foot's path and the
+        // seam), so the built seam feet are within tol / sin_a + tol / sin_b of the predicted
+        // ones' gap. The shared foot moves with the station: tol of its own plus its speed
+        // over the seam foot's times tol / sin (`Crossing`), for each blend; a plane against a
+        // plane at equal speeds, square to the seam, is 2 tol each. A side is deferred where
+        // either predicted gap is above the tolerance plus those two errors: there the built
+        // sections are farther apart than the tolerance.
         // itself (the check copies one surface's end row onto the other where that one fits
         // the vertices, and passes analytic and low-degree surfaces by): that no Join that
         // builds today is deferred is measured, on the goldens, the rig and the suites, not
@@ -839,13 +873,19 @@ fn setback_seam_sides(
             (feet.get(rail).copied(), feet.get(1 - rail.min(1)).copied())
         };
         let gap_decides = match crossings {
-            (Some((feet_a, rail_a, sin_a)), Some((feet_b, rail_b, sin_b)))
-                if sin_a.min(sin_b) >= 1e-3 =>
-            {
-                match (pick(&feet_a, rail_a), pick(&feet_b, rail_b)) {
+            (Some(a), Some(b)) if a.sine.min(b.sine) >= 1e-3 => {
+                match (pick(&a.feet, a.rail), pick(&b.feet, b.rail)) {
                     ((Some(seam_a), Some(shared_a)), (Some(seam_b), Some(shared_b))) => {
-                        let gap = seam_a.distance(seam_b).max(shared_a.distance(shared_b));
-                        Some(gap > tol + 2.0 * tol / sin_a.min(sin_b))
+                        // each built seam foot within tol / sin along the seam of its
+                        // prediction; each built shared foot within its own bound, tol, plus
+                        // its motion over the station's shift, ratio tol / sin (`Crossing`)
+                        let seam_room = tol + tol / a.sine + tol / b.sine;
+                        let shared_room =
+                            tol + (tol + a.ratio * tol / a.sine) + (tol + b.ratio * tol / b.sine);
+                        Some(
+                            seam_a.distance(seam_b) > seam_room
+                                || shared_a.distance(shared_b) > shared_room,
+                        )
                     }
                     _ => None,
                 }
